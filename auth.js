@@ -1,226 +1,147 @@
 'use strict';
-const crypto = require('crypto');
 const db = require('../db');
+const { verifyPassword, createSession, destroySession, parseCookies } = require('../lib/auth');
+const { parseBodyAuto, redirect, sendHtml } = require('../lib/util');
+const { layout, escapeHtml } = require('../lib/render');
 
-const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
-
-// ---------------- Password hashing (scrypt, built into Node's crypto) ----------------
-function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `${salt}:${derived}`;
-}
-
-function verifyPassword(password, stored) {
-  const [salt, derivedHex] = stored.split(':');
-  if (!salt || !derivedHex) return false;
-  const derived = crypto.scryptSync(password, salt, 64);
-  const storedBuf = Buffer.from(derivedHex, 'hex');
-  if (storedBuf.length !== derived.length) return false;
-  return crypto.timingSafeEqual(derived, storedBuf);
-}
-
-// ---------------- Sessions ----------------
-const SESSION_SECRET = process.env.SESSION_SECRET || 'staffhub_jwt_secret_key_2026_x987';
-
-function signToken(payload) {
-  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const hmac = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
-  return `${data}.${hmac}`;
-}
-
-function verifyToken(token) {
-  if (!token || typeof token !== 'string') return null;
-  const parts = token.split('.');
-  if (parts.length !== 2) return null;
-  const [data, signature] = parts;
-  const expectedHmac = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
-  if (signature !== expectedHmac) return null;
-  try {
-    const payload = JSON.parse(Buffer.from(data, 'base64url').toString('utf8'));
-    if (payload.exp && payload.exp < Date.now()) return null;
-    return payload;
-  } catch (_) {
-    return null;
-  }
-}
-
-const destroySessionStmt = db.prepare('DELETE FROM sessions WHERE token = ?');
-const getUserFromTokenStmt = db.prepare(
-  `SELECT s.expires_at, u.*, r.name as role_name, r.permission_tier, r.is_system as role_is_system
-   FROM sessions s JOIN users u ON u.id = s.user_id JOIN roles r ON r.id = u.role_id
-   WHERE s.token = ?`
-);
-
-const getUserByIdStmt = db.prepare(
-  `SELECT u.*, r.name as role_name, r.permission_tier, r.is_system as role_is_system
-   FROM users u JOIN roles r ON r.id = u.role_id
-   WHERE u.id = ? AND u.status = 'active'`
-);
-
-function createSession(userId) {
-  const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-  const token = signToken({ userId, exp: Date.now() + SESSION_TTL_MS });
-  try {
-    db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expiresAt);
-  } catch (_) {}
-  return { token, expiresAt };
-}
-
-function destroySession(token) {
-  if (!token) return;
-  try { destroySessionStmt.run(token); } catch (_) {}
-}
-
-function getUserFromToken(token) {
-  if (!token) return null;
-
-  // 1. Stateless cryptographic verification (for Vercel multi-container persistence)
-  const payload = verifyToken(token);
-  if (payload && payload.userId) {
-    try {
-      const user = getUserByIdStmt.get(payload.userId);
-      if (user) {
-        delete user.password_hash;
-        return user;
-      }
-    } catch (_) {}
-  }
-
-  // 2. Database lookup fallback
-  try {
-    const row = getUserFromTokenStmt.get(token);
-    if (!row) return null;
-    if (new Date(row.expires_at).getTime() < Date.now()) {
-      destroySession(token);
-      return null;
-    }
-    delete row.expires_at;
-    delete row.password_hash;
-    return row;
-  } catch (_) {
-    return null;
-  }
-}
-
-function parseCookies(req) {
-  const header = (typeof req === 'string' ? req : (req && req.headers ? req.headers.cookie : '')) || '';
-  const out = {};
-  if (!header) return out;
-  header.split(';').forEach((pair) => {
-    const idx = pair.indexOf('=');
-    if (idx === -1) return;
-    const key = pair.slice(0, idx).trim();
-    const val = pair.slice(idx + 1).trim();
-    out[key] = decodeURIComponent(val);
+module.exports = function (router) {
+  router.get('/site-lock', async (ctx) => {
+    const err = ctx.url.searchParams.get('error');
+    const redirectUrl = ctx.url.searchParams.get('redirect') || '/login';
+    const body = `
+      <div class="w-full max-w-sm">
+        <div class="text-center mb-8">
+          <div class="w-12 h-12 rounded-2xl bg-slate-900 dark:bg-indigo-600 text-white flex items-center justify-center font-bold text-xl mx-auto mb-3 shadow-md">🔒</div>
+          <h1 class="text-xl font-bold text-slate-800 dark:text-slate-100">Site Security Gate</h1>
+          <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">Please enter the master site password to continue</p>
+        </div>
+        <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm p-6">
+          ${err ? `<div class="mb-4 rounded-lg border border-red-200 bg-red-50 text-red-700 dark:bg-red-950 dark:border-red-800 dark:text-red-300 px-4 py-3 text-xs font-semibold">${escapeHtml(err)}</div>` : ''}
+          <form method="post" action="/site-lock" class="space-y-4">
+            <input type="hidden" name="redirect" value="${escapeHtml(redirectUrl)}"/>
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Master Site Password</label>
+              <input name="site_password" type="password" required autofocus class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-800 dark:text-slate-200 px-3.5 py-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Enter Site Password..."/>
+            </div>
+            <button class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl py-2.5 text-xs shadow-sm transition flex items-center justify-center gap-2">
+              <span>🔓</span> Unlock Site Access
+            </button>
+          </form>
+        </div>
+      </div>
+    `;
+    sendHtml(ctx.res, 200, layout({ title: 'Site Security Gate', user: null, activePath: '', url: ctx.url, body }));
   });
-  return out;
-}
 
-function currentUser(req) {
-  const cookies = parseCookies(req);
-  return getUserFromToken(cookies.hrms_session);
-}
+  router.post('/site-lock', async (ctx) => {
+    const { site_password, redirect: redirectTo } = await parseBodyAuto(ctx.req);
+    const { verifySiteGatePassword } = require('../lib/auth');
+    if (!verifySiteGatePassword(site_password)) {
+      return redirect(ctx.res, '/site-lock?error=' + encodeURIComponent('Incorrect Site Password.') + '&redirect=' + encodeURIComponent(redirectTo || '/login'));
+    }
+    const maxAge = 30 * 24 * 60 * 60;
+    const dest = (redirectTo && redirectTo !== '/site-lock' && !redirectTo.includes('site-lock')) ? redirectTo : '/login';
+    const cookie = `site_gate_pass=1; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
+    redirect(ctx.res, dest, { 'Set-Cookie': cookie });
+  });
 
-// The 4 constituencies are fixed — every access check in the app is keyed to
-// exactly these 4 strings. Unlike the app's old ranked tiers (employee <
-// approver < hr_admin < super_admin), these are NOT a hierarchy: each nav
-// item / route declares the explicit set of constituencies allowed to see it
-// (hasAccess(user, ['admin', 'it'])), and Super Admin is a universal override
-// rather than "the top of the ladder" — it always passes regardless of what
-// allowedRoles lists. Individual *roles* (see the `roles` table / lib/roles.js)
-// are fully custom and each one just points at one of these 4 constituencies,
-// so hasAccess() only ever needs to look at user.permission_tier (set by the
-// roles JOIN in getUserFromToken above), never at the role's own name.
-const CONSTITUENCIES = ['ess', 'admin', 'super_admin', 'it', 'manager', 'hiring_manager'];
+  router.get('/login', async (ctx) => {
+    if (ctx.user) return redirect(ctx.res, '/');
+    const err = ctx.url.searchParams.get('error');
+    const body = `
+      <div class="w-full max-w-sm">
+        <div class="text-center mb-8">
+          <div class="w-12 h-12 rounded-2xl bg-indigo-600 text-white flex items-center justify-center font-bold text-xl mx-auto mb-3">S</div>
+          <h1 class="text-xl font-semibold">StaffHub</h1>
+          <p class="text-sm text-slate-500 mt-1">Sign in to your account</p>
+        </div>
+        <div class="bg-white border border-slate-200 rounded-2xl shadow-sm p-6">
+          ${err ? `<div class="mb-4 rounded-lg border border-red-200 bg-red-50 text-red-700 px-4 py-3 text-sm">${escapeHtml(err)}</div>` : ''}
+          <form method="post" action="/login" class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-1">Email</label>
+              <input name="email" type="email" required class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="you@company.com"/>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-1">Password</label>
+              <input name="password" type="password" required class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="••••••••"/>
+            </div>
+            <button class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-lg py-2.5 text-sm transition">Sign in</button>
+          </form>
+        </div>
+        <div class="mt-6 text-xs text-slate-400 text-center leading-relaxed">
+          Demo accounts (password <code class="bg-slate-100 px-1 rounded">password123</code>):<br/>
+          superadmin@staffhub.my · hradmin@staffhub.my · approver@staffhub.my · it@staffhub.my · employee@staffhub.my
+        </div>
+      </div>
+    `;
+    sendHtml(ctx.res, 200, layout({ title: 'Sign in', user: null, activePath: '', url: ctx.url, body }));
+  });
 
-function hasAccess(user, allowedRoles) {
-  if (!user) return false;
-  if (user.permission_tier === 'super_admin') return true; // universal override
-  if (allowedRoles.includes('manager') && (user.permission_tier === 'manager' || user.permission_tier === 'hiring_manager')) return true;
-  if (allowedRoles.includes('hiring_manager') && (user.permission_tier === 'manager' || user.permission_tier === 'hiring_manager')) return true;
-  return allowedRoles.includes(user.permission_tier);
-}
+  router.post('/login', async (ctx) => {
+    const { email, password } = await parseBodyAuto(ctx.req);
+    const row = db.prepare('SELECT * FROM users WHERE email = ? AND status = ?').get((email || '').toLowerCase().trim(), 'active');
+    if (!row || !verifyPassword(password || '', row.password_hash)) {
+      return redirect(ctx.res, '/login?error=' + encodeURIComponent('Invalid email or password.'));
+    }
+    const { token, expiresAt } = createSession(row.id);
+    const maxAge = 7 * 24 * 60 * 60; // 7 days
+    const cookie = `hrms_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}; Expires=${new Date(expiresAt).toUTCString()}`;
+    redirect(ctx.res, '/', { 'Set-Cookie': cookie });
+  });
 
-function isSuperAdmin(user) {
-  return !!user && user.permission_tier === 'super_admin';
-}
+  router.post('/logout', async (ctx) => {
+    const cookies = parseCookies(ctx.req);
+    destroySession(cookies.hrms_session);
+    redirect(ctx.res, '/login', { 'Set-Cookie': 'hrms_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0' });
+  });
 
-// Only a Super Admin may assign a role that sits at the super_admin
-// constituency — this keeps Admins from being able to self-escalate or
-// promote others to the top tier, no matter what that role happens to be
-// named. Every other constituency (including the new IT tier) can be
-// assigned by any Admin, or by the Super Admin via the override above.
-function canAssignRole(actingUser, targetTier) {
-  if (targetTier === 'super_admin') return isSuperAdmin(actingUser);
-  return hasAccess(actingUser, ['admin']);
-}
+  router.get('/change-password', async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, '/login');
+    const body = `
+      <div class="max-w-md mx-auto">
+        <div class="flex items-center justify-between mb-6">
+          <h1 class="text-2xl font-semibold">Change Password</h1>
+        </div>
+        <div class="bg-white border border-slate-200 rounded-2xl shadow-sm p-6">
+          <form method="post" action="/change-password" class="space-y-4 text-sm">
+            <div>
+              <label class="block font-medium text-slate-700 mb-1">Current password</label>
+              <input name="current_password" type="password" required class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"/>
+            </div>
+            <div>
+              <label class="block font-medium text-slate-700 mb-1">New password</label>
+              <input name="new_password" type="password" required minlength="6" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"/>
+            </div>
+            <div>
+              <label class="block font-medium text-slate-700 mb-1">Confirm new password</label>
+              <input name="confirm_password" type="password" required minlength="6" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"/>
+            </div>
+            <button class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-lg py-2.5 text-sm">Update password</button>
+          </form>
+        </div>
+      </div>
+    `;
+    sendHtml(ctx.res, 200, layout({ title: 'Change Password', user: ctx.user, activePath: '', url: ctx.url, body }));
+  });
 
-// Dynamic replacement for the old fixed 'approver' role tier: true if this
-// user is listed as anyone's Direct or Indirect Superior. Used to decide who
-// sees an Approvals section (leave/claims/team-attendance) now that approval
-// visibility comes from the reporting line rather than from a role. This is
-// today's single-decision-point equivalent of the old approver-tier gate —
-// not yet the full 2-level sequential (Direct then Indirect, both required)
-// approval workflow, which is a later-stage build.
-const hasReportsStmt = db.prepare('SELECT 1 FROM users WHERE direct_superior_id = ? OR indirect_superior_id = ? LIMIT 1');
+  router.post('/change-password', async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, '/login');
+    const b = await parseBodyAuto(ctx.req);
+    const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(ctx.user.id);
+    if (!row || !verifyPassword(b.current_password || '', row.password_hash)) {
+      return redirect(ctx.res, '/change-password?error=' + encodeURIComponent('Current password is incorrect.'));
+    }
+    if (!b.new_password || b.new_password.length < 6) {
+      return redirect(ctx.res, '/change-password?error=' + encodeURIComponent('New password must be at least 6 characters long.'));
+    }
+    if (b.new_password !== b.confirm_password) {
+      return redirect(ctx.res, '/change-password?error=' + encodeURIComponent('New passwords do not match.'));
+    }
 
-function hasDirectOrIndirectReports(userId) {
-  if (!userId) return false;
-  const row = hasReportsStmt.get(userId, userId);
-  return !!row;
-}
-
-function isSalaryUnlocked(req) {
-  const cookies = parseCookies(req);
-  const token = cookies.hrms_session;
-  if (!token) return false;
-  const row = db.prepare('SELECT salary_unlocked_at FROM sessions WHERE token = ?').get(token);
-  if (!row || !row.salary_unlocked_at) return false;
-  const unlockedMs = new Date(row.salary_unlocked_at.replace(' ', 'T') + 'Z').getTime();
-  if (Number.isNaN(unlockedMs)) return false;
-  return Date.now() - unlockedMs < 15 * 60 * 1000;
-}
-
-function unlockSalary(req) {
-  const cookies = parseCookies(req);
-  const token = cookies.hrms_session;
-  if (!token) return;
-  db.prepare(`UPDATE sessions SET salary_unlocked_at = datetime('now') WHERE token = ?`).run(token);
-}
-
-const SITE_GATE_PASSWORD = (process.env.SITE_PASSWORD || 'Qwe123$').replace(/^["']|["']$/g, '').trim();
-
-function isSiteGatePassed(req) {
-  const cookies = parseCookies(req);
-  if (cookies.site_gate_pass === '1') return true;
-  const urlStr = req.headers['x-forwarded-uri'] || req.headers['x-matched-path'] || req.url || '';
-  if (urlStr.includes('site_gate_pass=1') || urlStr.includes('unlocked=1')) return true;
-  return false;
-}
-
-function verifySiteGatePassword(input) {
-  const cleanInput = (input || '').replace(/^["']|["']$/g, '').trim();
-  return cleanInput === SITE_GATE_PASSWORD || cleanInput === 'Qwe123$';
-}
-
-module.exports = {
-  hashPassword,
-  verifyPassword,
-  createSession,
-  destroySession,
-  getUserFromToken,
-  parseCookies,
-  currentUser,
-  hasAccess,
-  isSuperAdmin,
-  canAssignRole,
-  hasDirectOrIndirectReports,
-  isSalaryUnlocked,
-  unlockSalary,
-  isSiteGatePassed,
-  verifySiteGatePassword,
-  SITE_GATE_PASSWORD,
-  CONSTITUENCIES,
-  SESSION_TTL_MS,
+    const { hashPassword } = require('../lib/auth');
+    const newHash = hashPassword(b.new_password);
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(newHash, ctx.user.id);
+    redirect(ctx.res, '/profile?ok=' + encodeURIComponent('Password updated successfully.'));
+  });
 };
