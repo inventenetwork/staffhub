@@ -2,6 +2,10 @@
   "version": 2,
   "rewrites": [
     {
+      "source": "/public/(.*)",
+      "destination": "/public/$1"
+    },
+    {
       "source": "/(.*)",
       "destination": "/api"
     }

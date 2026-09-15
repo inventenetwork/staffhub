@@ -127,15 +127,18 @@ function serveStatic(req, res, pathname) {
 // ---------------- Request handler ----------------
 async function handleRequest(req, res) {
   try {
-    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const pathname = url.pathname;
+    const rawUrl = req.headers['x-forwarded-uri'] || req.url;
+    const url = new URL(rawUrl, `http://${req.headers.host || 'localhost'}`);
+    let pathname = url.pathname;
+    if (pathname === '/api' || pathname === '/api/') pathname = '/';
 
     if (pathname.startsWith('/public/')) {
       if (serveStatic(req, res, pathname)) return;
     }
 
     if (!isSiteGatePassed(req) && pathname !== '/site-lock') {
-      return redirect(res, '/site-lock?redirect=' + encodeURIComponent(pathname + url.search));
+      const target = (pathname === '/' || pathname === '/login') ? '/login' : (pathname + url.search);
+      return redirect(res, '/site-lock?redirect=' + encodeURIComponent(target));
     }
 
     const user = currentUser(req);
