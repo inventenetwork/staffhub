@@ -46,6 +46,7 @@ function verifyToken(token) {
 }
 
 const destroySessionStmt = db.prepare('DELETE FROM sessions WHERE token = ?');
+const insertSessionStmt = db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)');
 const getUserFromTokenStmt = db.prepare(
   `SELECT s.expires_at, u.*, r.name as role_name, r.permission_tier, r.is_system as role_is_system
    FROM sessions s JOIN users u ON u.id = s.user_id JOIN roles r ON r.id = u.role_id
@@ -58,16 +59,22 @@ const getUserByIdStmt = db.prepare(
    WHERE u.id = ? AND u.status = 'active'`
 );
 
+const getUserByEmailStmt = db.prepare(
+  `SELECT u.*, r.name as role_name, r.permission_tier, r.is_system as role_is_system
+   FROM users u JOIN roles r ON r.id = u.role_id
+   WHERE LOWER(u.email) = LOWER(?) AND u.status = 'active'`
+);
+
 function createSession(userId) {
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
   let email = '';
   try {
-    const row = db.prepare('SELECT email FROM users WHERE id = ?').get(userId);
-    if (row) email = row.email;
+    const user = getUserByIdStmt.get(userId);
+    if (user) email = user.email;
   } catch (_) {}
   const token = signToken({ userId, email, exp: Date.now() + SESSION_TTL_MS });
   try {
-    db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expiresAt);
+    insertSessionStmt.run(token, userId, expiresAt);
   } catch (_) {}
   return { token, expiresAt };
 }
@@ -94,11 +101,7 @@ function getUserFromToken(token) {
     }
     if (payload.email) {
       try {
-        const userByEmail = db.prepare(
-          `SELECT u.*, r.name as role_name, r.permission_tier, r.is_system as role_is_system
-           FROM users u JOIN roles r ON r.id = u.role_id
-           WHERE LOWER(u.email) = LOWER(?) AND u.status = 'active'`
-        ).get(payload.email);
+        const userByEmail = getUserByEmailStmt.get(payload.email);
         if (userByEmail) {
           delete userByEmail.password_hash;
           return userByEmail;
