@@ -2,7 +2,10 @@
   "version": 2,
   "functions": {
     "api/index.js": {
-      "includeFiles": "data/hrms.db,db/schema.sql"
+      "includeFiles": [
+        "data/hrms.db",
+        "db/schema.sql"
+      ]
     }
   },
   "rewrites": [
