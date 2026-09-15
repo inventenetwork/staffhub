@@ -127,10 +127,16 @@ function serveStatic(req, res, pathname) {
 // ---------------- Request handler ----------------
 async function handleRequest(req, res) {
   try {
-    const rawUrl = req.headers['x-forwarded-uri'] || req.headers['x-matched-path'] || req.url || '';
+    const rawUrl = req.headers['x-invoke-path'] || req.headers['x-forwarded-uri'] || req.headers['x-matched-path'] || req.url || '';
     const url = new URL(rawUrl, `http://${req.headers.host || 'localhost'}`);
     let pathname = url.pathname;
-    if (pathname === '/api' || pathname === '/api/') pathname = '/';
+
+    const vPath = url.searchParams.get('__path');
+    if (vPath !== null) {
+      pathname = '/' + vPath.replace(/^\//, '');
+    } else if (pathname === '/api' || pathname === '/api/') {
+      pathname = '/';
+    }
 
     if (pathname.startsWith('/public/')) {
       if (serveStatic(req, res, pathname)) return;
