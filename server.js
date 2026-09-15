@@ -127,18 +127,24 @@ function serveStatic(req, res, pathname) {
 // ---------------- Request handler ----------------
 async function handleRequest(req, res) {
   try {
-    const rawUrl = req.headers['x-forwarded-uri'] || req.url;
+    const rawUrl = req.headers['x-forwarded-uri'] || req.headers['x-matched-path'] || req.url || '';
     const url = new URL(rawUrl, `http://${req.headers.host || 'localhost'}`);
     let pathname = url.pathname;
-    if (pathname === '/api' || pathname === '/api/') pathname = '/';
+
+    // Detect if user is accessing or being sent to the master site lock page
+    const isLockPage = pathname === '/site-lock' || url.searchParams.has('redirect') || rawUrl.includes('site-lock');
 
     if (pathname.startsWith('/public/')) {
       if (serveStatic(req, res, pathname)) return;
     }
 
-    if (!isSiteGatePassed(req) && pathname !== '/site-lock') {
-      const target = (pathname === '/' || pathname === '/login') ? '/login' : (pathname + url.search);
-      return redirect(res, '/site-lock?redirect=' + encodeURIComponent(target));
+    if (!isSiteGatePassed(req)) {
+      if (!isLockPage) {
+        return redirect(res, '/site-lock?redirect=%2Flogin');
+      }
+      pathname = '/site-lock';
+    } else if (pathname === '/api' || pathname === '/api/') {
+      pathname = '/';
     }
 
     const user = currentUser(req);
