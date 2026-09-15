@@ -22,7 +22,7 @@ const { URL } = require('url');
   } catch (_) { /* .env is optional */ }
 })();
 
-const { currentUser, isSiteGatePassed } = require('./lib/auth');
+const { currentUser } = require('./lib/auth');
 const { sendHtml, sendJson, redirect } = require('./lib/util');
 const { layout } = require('./lib/render');
 
@@ -130,21 +130,10 @@ async function handleRequest(req, res) {
     const rawUrl = req.headers['x-forwarded-uri'] || req.headers['x-matched-path'] || req.url || '';
     const url = new URL(rawUrl, `http://${req.headers.host || 'localhost'}`);
     let pathname = url.pathname;
-
-    // Detect if user is accessing or being sent to the master site lock page
-    const isLockPage = pathname === '/site-lock' || url.searchParams.has('redirect') || rawUrl.includes('site-lock');
+    if (pathname === '/api' || pathname === '/api/') pathname = '/';
 
     if (pathname.startsWith('/public/')) {
       if (serveStatic(req, res, pathname)) return;
-    }
-
-    if (!isSiteGatePassed(req)) {
-      if (!isLockPage) {
-        return redirect(res, '/site-lock?redirect=%2Flogin');
-      }
-      pathname = '/site-lock';
-    } else if (pathname === '/api' || pathname === '/api/') {
-      pathname = '/';
     }
 
     const user = currentUser(req);
