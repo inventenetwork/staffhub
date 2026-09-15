@@ -1,6 +1,5 @@
 'use strict';
 const crypto = require('crypto');
-const { computePayslip } = require('../lib/statutory');
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
