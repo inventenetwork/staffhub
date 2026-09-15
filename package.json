@@ -1,0 +1,15 @@
+{
+  "name": "hrms",
+  "version": "1.0.0",
+  "description": "StaffHub — Employee Self-Service & HR Admin web app (zero external dependencies, uses only Node.js built-ins)",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "seed": "node db/seed.js"
+  },
+  "dependencies": {}
+}
