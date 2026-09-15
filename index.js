@@ -544,17 +544,3 @@ migrateSuperiorColumnsIfNeeded();
 migrateSessionsColumnIfNeeded();
 
 module.exports = db;
-
-const runSeed = require('./seed');
-function autoSeedIfNeeded() {
-  try {
-    const row = db.prepare('SELECT COUNT(*) as c FROM users').get();
-    if (!row || row.c === 0) {
-      console.log('Database empty on startup. Running seed...');
-      runSeed(db);
-    }
-  } catch (err) {
-    console.error('Auto-seed failed:', err);
-  }
-}
-autoSeedIfNeeded();
