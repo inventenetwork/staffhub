@@ -60,7 +60,12 @@ const getUserByIdStmt = db.prepare(
 
 function createSession(userId) {
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-  const token = signToken({ userId, exp: Date.now() + SESSION_TTL_MS });
+  let email = '';
+  try {
+    const row = db.prepare('SELECT email FROM users WHERE id = ?').get(userId);
+    if (row) email = row.email;
+  } catch (_) {}
+  const token = signToken({ userId, email, exp: Date.now() + SESSION_TTL_MS });
   try {
     db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expiresAt);
   } catch (_) {}
@@ -77,14 +82,29 @@ function getUserFromToken(token) {
 
   // 1. Stateless cryptographic verification (for Vercel multi-container persistence)
   const payload = verifyToken(token);
-  if (payload && payload.userId) {
-    try {
-      const user = getUserByIdStmt.get(payload.userId);
-      if (user) {
-        delete user.password_hash;
-        return user;
-      }
-    } catch (_) {}
+  if (payload) {
+    if (payload.userId) {
+      try {
+        const user = getUserByIdStmt.get(payload.userId);
+        if (user) {
+          delete user.password_hash;
+          return user;
+        }
+      } catch (_) {}
+    }
+    if (payload.email) {
+      try {
+        const userByEmail = db.prepare(
+          `SELECT u.*, r.name as role_name, r.permission_tier, r.is_system as role_is_system
+           FROM users u JOIN roles r ON r.id = u.role_id
+           WHERE LOWER(u.email) = LOWER(?) AND u.status = 'active'`
+        ).get(payload.email);
+        if (userByEmail) {
+          delete userByEmail.password_hash;
+          return userByEmail;
+        }
+      } catch (_) {}
+    }
   }
 
   // 2. Database lookup fallback
